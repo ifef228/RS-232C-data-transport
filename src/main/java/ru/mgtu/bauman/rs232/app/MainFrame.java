@@ -3,11 +3,11 @@ package ru.mgtu.bauman.rs232.app;
 import com.fazecast.jSerialComm.SerialPort;
 import ru.mgtu.bauman.rs232.datalink.DataLinkLayer;
 import ru.mgtu.bauman.rs232.physical.SerialPhysicalLayer;
+import ru.mgtu.bauman.rs232.util.AppLog;
 
 import javax.swing.*;
 import javax.swing.border.EmptyBorder;
 import java.awt.*;
-import java.io.File;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 
@@ -15,6 +15,14 @@ import java.nio.file.Paths;
  * Пользовательский уровень: меню, выбор режима, COM-порта, передача/приём файла.
  */
 public class MainFrame extends JFrame {
+
+    private static String defaultReceiveDirectory() {
+        return Paths.get(System.getProperty("user.dir", ".")).toAbsolutePath().normalize().toString();
+    }
+
+    /** Рекомендуемая пара для socat: передатчик — A, приёмник — B (см. README-VIRTUAL-PORTS). */
+    public static final String RECOMMENDED_PORT_SENDER = "/tmp/vcomA";
+    public static final String RECOMMENDED_PORT_RECEIVER = "/tmp/vcomB";
 
     private final JComboBox<String> portCombo = new JComboBox<>();
     private final JComboBox<Integer> baudCombo = new JComboBox<>(new Integer[]{9600, 19200, 38400, 57600, 115200});
@@ -28,7 +36,8 @@ public class MainFrame extends JFrame {
     private final JRadioButton modeReceiver = new JRadioButton("Приёмник (каталог для файла)");
 
     private final JTextField fileField = new JTextField(40);
-    private final JTextField dirField = new JTextField(40);
+    /** По умолчанию — каталог запуска (обычно папка проекта курсача, если java запущена оттуда). */
+    private final JTextField dirField = new JTextField(defaultReceiveDirectory(), 40);
     private final JButton chooseFileBtn = new JButton("Файл…");
     private final JButton chooseDirBtn = new JButton("Каталог…");
 
@@ -40,6 +49,8 @@ public class MainFrame extends JFrame {
 
     private SerialPhysicalLayer physical;
     private DataLinkLayer dataLink;
+    /** Фоновый приём файла (режим приёмника). */
+    private Thread receiverThread;
 
     public MainFrame() {
         super("Пересылка текстовых файлов по RS-232 (вариант 38)");
@@ -93,7 +104,40 @@ public class MainFrame extends JFrame {
         chooseFileBtn.setEnabled(s);
         dirField.setEnabled(!s);
         chooseDirBtn.setEnabled(!s);
-        actionBtn.setText(s ? "Передать файл" : "Начать приём (ожидание)");
+        if (s) {
+            actionBtn.setText("Передать файл");
+            actionBtn.setToolTipText("После «Подключить порт» — отправить выбранный файл.");
+        } else {
+            actionBtn.setText("Справка: режим приёмника");
+            actionBtn.setToolTipText("Ожидание файла включается само после «Подключить порт». Кнопка открывает подсказку.");
+        }
+        applyRecommendedDefaultsForMode();
+    }
+
+    /**
+     * Подставляет порт и адреса как в инструкции: передатчик vcomA, 1→2; приёмник vcomB, 2→1.
+     */
+    private void applyRecommendedDefaultsForMode() {
+        boolean sender = modeSender.isSelected();
+        localAddrSpinner.setValue(sender ? 1 : 2);
+        remoteAddrSpinner.setValue(sender ? 2 : 1);
+
+        String port = sender ? RECOMMENDED_PORT_SENDER : RECOMMENDED_PORT_RECEIVER;
+        boolean found = false;
+        for (int i = 0; i < portCombo.getItemCount(); i++) {
+            if (port.equals(portCombo.getItemAt(i))) {
+                portCombo.setSelectedIndex(i);
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            portCombo.insertItemAt(port, 0);
+            portCombo.setSelectedIndex(0);
+        }
+        if (portCombo.getEditor() != null && portCombo.getEditor().getEditorComponent() instanceof JTextField tf) {
+            tf.setText(port);
+        }
     }
 
     private JPanel buildContent() {
@@ -191,10 +235,12 @@ public class MainFrame extends JFrame {
             portCombo.addItem(p.getSystemPortName());
         }
         portCombo.setEditable(true);
-        log("Найдено портов: " + portCombo.getItemCount());
+        applyRecommendedDefaultsForMode();
+        log("Найдено портов: " + portCombo.getItemCount() + " (подставлен рекомендуемый порт для текущего режима)");
     }
 
     private void log(String s) {
+        AppLog.line("[GUI] " + s);
         SwingUtilities.invokeLater(() -> {
             logArea.append(s + "\n");
             logArea.setCaretPosition(logArea.getDocument().getLength());
@@ -218,12 +264,39 @@ public class MainFrame extends JFrame {
 
             dataLink = new DataLinkLayer(physical);
             dataLink.setAddresses((Integer) localAddrSpinner.getValue(), (Integer) remoteAddrSpinner.getValue());
+            dataLink.setTraceLog(msg -> log("[канал] " + msg));
             dataLink.start();
 
             connectBtn.setEnabled(false);
             disconnectBtn.setEnabled(true);
+
+            if (modeReceiver.isSelected()) {
+                String dir = dirField.getText().trim();
+                if (dir.isEmpty()) {
+                    JOptionPane.showMessageDialog(this,
+                            "Укажите каталог для сохранения файла до подключения.",
+                            "Каталог", JOptionPane.WARNING_MESSAGE);
+                    disconnect();
+                    return;
+                }
+                Path outDir = Paths.get(dir);
+                receiverThread = new Thread(() -> {
+                    try {
+                        FileTransferService.receiveLoop(dataLink, physical, outDir, this::log, msg ->
+                                SwingUtilities.invokeLater(() ->
+                                        JOptionPane.showMessageDialog(this, "Удалённый абонент: " + msg,
+                                                "Сообщение", JOptionPane.INFORMATION_MESSAGE)));
+                    } catch (Exception ex) {
+                        SwingUtilities.invokeLater(() -> log("Приём: " + ex.getMessage()));
+                    }
+                }, "receiver");
+                receiverThread.setDaemon(true);
+                receiverThread.start();
+                log("Приём запущен. Ожидание кадров (каталог: " + outDir.toAbsolutePath() + ").");
+            }
             actionBtn.setEnabled(true);
-            log("Порт открыт: " + name + " " + baud + " " + dataBits + "N" + (stop == 0 ? "1" : "2");
+
+            log("Порт открыт: " + name + " " + baud + " " + dataBits + "N" + (stop == 0 ? "1" : "2"));
         } catch (Exception ex) {
             JOptionPane.showMessageDialog(this, ex.getMessage(), "Ошибка открытия порта", JOptionPane.ERROR_MESSAGE);
             disconnect();
@@ -231,7 +304,15 @@ public class MainFrame extends JFrame {
     }
 
     private void disconnect() {
-        actionBtn.setEnabled(false);
+        if (receiverThread != null) {
+            receiverThread.interrupt();
+            try {
+                receiverThread.join(1500);
+            } catch (InterruptedException ignored) {
+                Thread.currentThread().interrupt();
+            }
+            receiverThread = null;
+        }
         if (dataLink != null) {
             dataLink.close();
             dataLink = null;
@@ -242,6 +323,7 @@ public class MainFrame extends JFrame {
         }
         connectBtn.setEnabled(true);
         disconnectBtn.setEnabled(false);
+        actionBtn.setEnabled(true);
         log("Порт закрыт.");
     }
 
@@ -250,28 +332,24 @@ public class MainFrame extends JFrame {
             JOptionPane.showMessageDialog(this, "Сначала подключите порт.", "Нет соединения", JOptionPane.WARNING_MESSAGE);
             return;
         }
+        if (modeReceiver.isSelected()) {
+            JOptionPane.showMessageDialog(this,
+                    "Ожидание файла уже работает в фоне — отдельно нажимать «Начать приём» не нужно.\n\n"
+                            + "Порядок теста: 1) приёмник — каталог и «Подключить порт»; 2) передатчик — файл и «Подключить», затем «Передать файл».\n\n"
+                            + "Смотрите лог: строки «Приём запущен» и «[канал] RX …» означают, что канал живой.",
+                    "Режим приёмника", JOptionPane.INFORMATION_MESSAGE);
+            return;
+        }
         actionBtn.setEnabled(false);
         Thread t = new Thread(() -> {
             try {
-                if (modeSender.isSelected()) {
-                    String p = fileField.getText().trim();
-                    if (p.isEmpty()) {
-                        SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Укажите файл.", "Нет файла", JOptionPane.WARNING_MESSAGE));
-                        return;
-                    }
-                    Path path = Paths.get(p);
-                    FileTransferService.sendTextFile(path, dataLink, this::log);
-                } else {
-                    String d = dirField.getText().trim();
-                    if (d.isEmpty()) {
-                        SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Укажите каталог для сохранения.", "Нет каталога", JOptionPane.WARNING_MESSAGE));
-                        return;
-                    }
-                    Path out = Paths.get(d);
-                    FileTransferService.receiveLoop(dataLink, out, this::log, msg ->
-                            SwingUtilities.invokeLater(() ->
-                                    JOptionPane.showMessageDialog(this, "Удалённый абонент: " + msg, "Сообщение", JOptionPane.INFORMATION_MESSAGE)));
+                String p = fileField.getText().trim();
+                if (p.isEmpty()) {
+                    SwingUtilities.invokeLater(() -> JOptionPane.showMessageDialog(this, "Укажите файл.", "Нет файла", JOptionPane.WARNING_MESSAGE));
+                    return;
                 }
+                Path path = Paths.get(p);
+                FileTransferService.sendTextFile(path, dataLink, this::log);
             } catch (Exception ex) {
                 SwingUtilities.invokeLater(() -> {
                     log("Ошибка: " + ex.getMessage());

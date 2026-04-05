@@ -4,6 +4,7 @@ import ru.mgtu.bauman.rs232.codec.PayloadCodec1511;
 import ru.mgtu.bauman.rs232.datalink.DataLinkLayer;
 import ru.mgtu.bauman.rs232.datalink.Frame;
 import ru.mgtu.bauman.rs232.datalink.ProtocolConstants;
+import ru.mgtu.bauman.rs232.physical.SerialPhysicalLayer;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -73,7 +74,11 @@ public final class FileTransferService {
         return bb.array();
     }
 
-    public static void receiveLoop(DataLinkLayer link, Path outputDir, Consumer<String> log, Consumer<String> onPeerNotify)
+    /**
+     * Цикл приёма. После каждой успешной передачи (кадр Uplink) снова ждёт следующую сессию — переподключать порт не нужно.
+     * Завершается при закрытии порта или прерывании потока.
+     */
+    public static void receiveLoop(DataLinkLayer link, SerialPhysicalLayer physical, Path outputDir, Consumer<String> log, Consumer<String> onPeerNotify)
             throws IOException, InterruptedException {
         Files.createDirectories(outputDir);
         ByteArrayOutputBuffer acc = new ByteArrayOutputBuffer();
@@ -81,8 +86,15 @@ public final class FileTransferService {
         int pendingSize = -1;
         boolean inTransfer = false;
 
-        while (true) {
-            Frame f = link.pollAppFrame(60_000);
+        while (physical.isOpen()) {
+            Frame f;
+            try {
+                f = link.pollAppFrame(1000);
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                log.accept("Приём остановлен.");
+                return;
+            }
             if (f == null) {
                 continue;
             }
@@ -146,8 +158,12 @@ public final class FileTransferService {
             }
             if (f.type == ProtocolConstants.FT_UPLINK) {
                 link.sendAck(f.seq);
-                log.accept("Принят Uplink, соединение разорвано.");
-                return;
+                inTransfer = false;
+                pendingName = null;
+                pendingSize = -1;
+                acc.reset();
+                log.accept("Принят Uplink, сессия завершена. Ожидание следующей передачи…");
+                continue;
             }
             if (f.type == ProtocolConstants.FT_RET) {
                 link.sendAck(f.seq);

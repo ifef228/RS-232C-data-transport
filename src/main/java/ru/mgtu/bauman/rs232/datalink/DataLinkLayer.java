@@ -7,6 +7,7 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.function.Consumer;
 
 /**
  * Канальный уровень: кадрирование, надёжная доставка (ACK/Ret), очереди кадров.
@@ -25,8 +26,21 @@ public class DataLinkLayer implements AutoCloseable {
     private final BlockingQueue<Frame> appQueue = new LinkedBlockingQueue<>(1024);
     private final BlockingQueue<Frame> ackQueue = new LinkedBlockingQueue<>(256);
 
+    /** Опционально: отладочные сообщения о принятых кадрах и сбоях разбора. */
+    private Consumer<String> traceLog;
+
     public DataLinkLayer(SerialPhysicalLayer physical) {
         this.physical = physical;
+    }
+
+    public void setTraceLog(Consumer<String> traceLog) {
+        this.traceLog = traceLog;
+    }
+
+    private void trace(String msg) {
+        if (traceLog != null) {
+            traceLog.accept(msg);
+        }
     }
 
     public void setAddresses(int local, int remote) {
@@ -69,8 +83,10 @@ public class DataLinkLayer implements AutoCloseable {
                 }
                 boolean forUs = f.dst == localAddr || f.dst == ProtocolConstants.ADDR_BROADCAST;
                 if (!forUs) {
+                    trace("Кадр не для нас: dst=" + f.dst + " (локальный " + localAddr + ")");
                     continue;
                 }
+                trace("RX type=" + f.type + " seq=" + f.seq + " len=" + f.payload.length);
                 if (f.type == ProtocolConstants.FT_ACK) {
                     ackQueue.offer(f);
                 } else {
@@ -80,6 +96,7 @@ public class DataLinkLayer implements AutoCloseable {
                 if (!running.get()) {
                     break;
                 }
+                trace("Разбор кадра: " + e.getClass().getSimpleName() + ": " + e.getMessage());
             }
         }
     }
