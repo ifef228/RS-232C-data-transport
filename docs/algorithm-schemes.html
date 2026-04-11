@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Алгоритмы — передача файлов по RS-232 (вариант 38)</title>
+  <style>
+    :root {
+      --bg: #f7f8fb;
+      --card: #fff;
+      --text: #1a1d26;
+      --muted: #5c6370;
+      --border: #d8dde8;
+      --start: #2d6a4f;
+      --proc: #457b9d;
+      --dec: #c1121f;
+      --io: #7b2cbf;
+      --line: #333;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: "Segoe UI", system-ui, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.45;
+      margin: 0;
+      padding: 1.5rem;
+      max-width: 960px;
+      margin-left: auto;
+      margin-right: auto;
+    }
+    h1 {
+      font-size: 1.35rem;
+      font-weight: 700;
+      margin-bottom: 0.25rem;
+    }
+    .subtitle { color: var(--muted); font-size: 0.95rem; margin-bottom: 1.5rem; }
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1.25rem 1.5rem;
+      margin-bottom: 1.75rem;
+      box-shadow: 0 1px 3px rgba(0,0,0,.06);
+    }
+    h2 {
+      font-size: 1.05rem;
+      margin: 0 0 1rem 0;
+      padding-bottom: 0.5rem;
+      border-bottom: 1px solid var(--border);
+    }
+    .legend {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+    }
+    .legend span { display: inline-flex; align-items: center; gap: 0.35rem; }
+    .dot { width: 12px; height: 12px; border-radius: 3px; display: inline-block; }
+    svg { width: 100%; height: auto; display: block; }
+    .note { font-size: 0.88rem; color: var(--muted); margin-top: 0.75rem; }
+    @media print {
+      body { background: #fff; }
+      section { break-inside: avoid; box-shadow: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <h1>Схемы алгоритмов</h1>
+  <p class="subtitle">Программа пересылки текстовых файлов по RS-232 (канальный протокол, код [15,11]). Для пояснительной записки / графической части. Текстовое описание тех же схем: <a href="algorithm-schemes.md">algorithm-schemes.md</a>.</p>
+
+  <div class="legend">
+    <span><i class="dot" style="background:var(--start)"></i> начало / конец</span>
+    <span><i class="dot" style="background:var(--proc)"></i> процесс</span>
+    <span><i class="dot" style="background:var(--dec)"></i> условие</span>
+    <span><i class="dot" style="background:var(--io)"></i> ввод-вывод / кадр</span>
+  </div>
+
+  <!-- 1. Общая архитектура -->
+  <section>
+    <h2>1. Общая схема взаимодействия узлов</h2>
+    <svg viewBox="0 0 720 200" xmlns="http://www.w3.org/2000/svg" aria-label="Два узла и канал RS-232">
+      <defs>
+        <marker id="arr" markerWidth="8" markerHeight="8" refX="7" refY="3" orient="auto">
+          <path d="M0,0 L8,3 L0,6 Z" fill="#333" />
+        </marker>
+      </defs>
+      <rect x="40" y="40" width="200" height="100" rx="8" fill="#e8f4f0" stroke="#2d6a4f" stroke-width="2"/>
+      <text x="140" y="78" text-anchor="middle" font-size="14" font-weight="600">Передатчик</text>
+      <text x="140" y="100" text-anchor="middle" font-size="12" fill="#444">лок. адр. 1 → удал. 2</text>
+      <text x="140" y="122" text-anchor="middle" font-size="11" fill="#666">COM (напр. vcomA)</text>
+
+      <rect x="480" y="40" width="200" height="100" rx="8" fill="#e8eef7" stroke="#457b9d" stroke-width="2"/>
+      <text x="580" y="78" text-anchor="middle" font-size="14" font-weight="600">Приёмник</text>
+      <text x="580" y="100" text-anchor="middle" font-size="12" fill="#444">лок. адр. 2 → удал. 1</text>
+      <text x="580" y="122" text-anchor="middle" font-size="11" fill="#666">COM (напр. vcomB)</text>
+
+      <line x1="240" y1="90" x2="480" y2="90" stroke="#333" stroke-width="2" marker-end="url(#arr)"/>
+      <line x1="480" y1="110" x2="240" y2="110" stroke="#666" stroke-width="1.5" stroke-dasharray="6 4" marker-end="url(#arr)"/>
+      <text x="360" y="82" text-anchor="middle" font-size="11" fill="#333">кадры (Link, META, I, END…)</text>
+      <text x="360" y="128" text-anchor="middle" font-size="11" fill="#555">ACK</text>
+
+      <text x="360" y="175" text-anchor="middle" font-size="12" fill="#555">Физический канал: RS-232 (нуль-модем / виртуальная пара портов)</text>
+    </svg>
+    <p class="note">Сначала подключают приёмник, затем передатчик. На каждый кадр с надёжной доставкой приёмник отвечает кадром ACK с тем же номером seq.</p>
+  </section>
+
+  <!-- 2. Передатчик -->
+  <section>
+    <h2>2. Алгоритм узла-передатчика (передача одного файла)</h2>
+    <svg viewBox="0 0 560 720" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="a2" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#333"/></marker>
+      </defs>
+      <g font-family="Segoe UI, sans-serif" font-size="12">
+        <!-- boxes -->
+        <ellipse cx="280" cy="28" rx="56" ry="22" fill="#2d6a4f" stroke="#1b4332" stroke-width="2"/>
+        <text x="280" y="33" text-anchor="middle" fill="#fff" font-weight="600">Начало</text>
+
+        <rect x="160" y="62" width="240" height="36" rx="6" fill="#457b9d" stroke="#1d3557" stroke-width="1.5"/>
+        <text x="280" y="85" text-anchor="middle" fill="#fff">Прочитать файл в память</text>
+
+        <rect x="145" y="118" width="270" height="44" rx="6" fill="#7b2cbf" stroke="#5a189a" stroke-width="1.5"/>
+        <text x="280" y="138" text-anchor="middle" fill="#fff">seq := 1</text>
+        <text x="280" y="154" text-anchor="middle" fill="#fff">Сформировать META (имя UTF-8, размер)</text>
+
+        <rect x="130" y="182" width="300" height="40" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="280" y="207" text-anchor="middle" fill="#fff">Надёжно: кадр Link (пустое тело), seq++</text>
+
+        <rect x="130" y="238" width="300" height="40" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="280" y="263" text-anchor="middle" fill="#fff">Надёжно: кадр META, seq++</text>
+
+        <rect x="145" y="294" width="270" height="40" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="280" y="319" text-anchor="middle" fill="#fff">Закодировать файл кодом [15,11]</text>
+
+        <path d="M280 350 L380 350 L380 390 L200 390 L200 430" fill="none" stroke="#333" marker-end="url(#a2)"/>
+        <polygon points="280,350 280,370 320,370 320,390" fill="none" stroke="#333"/>
+        <text x="330" y="365" font-size="11">есть ещё</text>
+        <text x="250" y="365" font-size="11">фрагменты?</text>
+
+        <rect x="200" y="400" width="160" height="44" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="280" y="422" text-anchor="middle" fill="#fff">Надёжно: кадр I</text>
+        <text x="280" y="438" text-anchor="middle" fill="#fff">(очередной фрагмент), seq++</text>
+
+        <path d="M360 422 L420 422 L420 350 L320 350" fill="none" stroke="#333" marker-end="url(#a2)"/>
+
+        <rect x="145" y="468" width="270" height="40" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="280" y="493" text-anchor="middle" fill="#fff">Надёжно: кадр END, seq++</text>
+
+        <rect x="145" y="524" width="270" height="40" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="280" y="549" text-anchor="middle" fill="#fff">Надёжно: кадр Uplink, seq++</text>
+
+        <ellipse cx="280" cy="608" rx="64" ry="24" fill="#2d6a4f" stroke="#1b4332" stroke-width="2"/>
+        <text x="280" y="613" text-anchor="middle" fill="#fff" font-weight="600">Конец (успех)</text>
+
+        <line x1="280" y1="50" x2="280" y2="62" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="98" x2="280" y2="118" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="162" x2="280" y2="182" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="222" x2="280" y2="238" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="278" x2="280" y2="294" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="334" x2="280" y2="350" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="444" x2="280" y2="468" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="508" x2="280" y2="524" stroke="#333" marker-end="url(#a2)"/>
+        <line x1="280" y1="564" x2="280" y2="584" stroke="#333" marker-end="url(#a2)"/>
+      </g>
+    </svg>
+    <p class="note">Блок «Надёжно» — вызов процедуры отправки кадра с ожиданием ACK (см. рис. 3). Цикл по фрагментам закодированных данных повторяется, пока не переданы все байты.</p>
+  </section>
+
+  <!-- 3. Надёжная отправка -->
+  <section>
+    <h2>3. Алгоритм надёжной отправки кадра (sendReliable)</h2>
+    <svg viewBox="0 0 520 520" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="a3" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#333"/></marker></defs>
+      <g font-family="Segoe UI, sans-serif" font-size="12">
+        <ellipse cx="260" cy="28" rx="70" ry="22" fill="#2d6a4f" stroke="#1b4332" stroke-width="2"/>
+        <text x="260" y="33" text-anchor="middle" fill="#fff" font-weight="600">Вход: кадр F</text>
+
+        <rect x="140" y="62" width="240" height="36" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="260" y="85" text-anchor="middle" fill="#fff">attempt := 0</text>
+
+        <path d="M260 98 L260 120 L360 120 L360 160 L260 160 L260 180" fill="none" stroke="#333"/>
+        <path d="M260 120 L160 120 L160 200" fill="none" stroke="#333" marker-end="url(#a3)"/>
+        <text x="200" y="115" font-size="11">attempt &lt; maxRetries?</text>
+        <text x="175" y="138" font-size="11">нет</text>
+        <text x="300" y="138" font-size="11">да</text>
+
+        <rect x="170" y="188" width="180" height="50" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="260" y="210" text-anchor="middle" fill="#fff">Закодировать кадр (WireCodec)</text>
+        <text x="260" y="228" text-anchor="middle" fill="#fff">Записать байты в COM-порт</text>
+
+        <rect x="150" y="252" width="220" height="44" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="260" y="275" text-anchor="middle" fill="#fff">Ждать ACK с seq = F.seq</text>
+        <text x="260" y="290" text-anchor="middle" fill="#fff">(таймаут ackTimeout)</text>
+
+        <path d="M260 296 L260 318 L360 318 L360 360 L260 360" fill="none" stroke="#333"/>
+        <path d="M260 318 L160 318 L160 400" fill="none" stroke="#333" marker-end="url(#a3)"/>
+        <text x="200" y="312" font-size="11">ACK получен?</text>
+        <text x="175" y="335" font-size="11">нет</text>
+        <text x="300" y="335" font-size="11">да</text>
+
+        <rect x="200" y="368" width="120" height="36" rx="6" fill="#2d6a4f" stroke="#1b4332"/>
+        <text x="260" y="390" text-anchor="middle" fill="#fff" font-weight="600">Выход: ОК</text>
+
+        <rect x="80" y="400" width="120" height="36" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="140" y="422" text-anchor="middle" fill="#fff">attempt++</text>
+        <path d="M140 436 L140 460 L260 460 L260 120" fill="none" stroke="#333" marker-end="url(#a3)"/>
+
+        <rect x="180" y="448" width="160" height="44" rx="6" fill="#c1121f" stroke="#780000"/>
+        <text x="260" y="470" text-anchor="middle" fill="#fff">Исключение:</text>
+        <text x="260" y="486" text-anchor="middle" fill="#fff">нет подтверждения ACK</text>
+        <line x1="260" y1="180" x2="260" y2="188" stroke="#333" marker-end="url(#a3)"/>
+        <line x1="260" y1="238" x2="260" y2="252" stroke="#333" marker-end="url(#a3)"/>
+        <line x1="260" y1="360" x2="260" y2="368" stroke="#333" marker-end="url(#a3)"/>
+        <line x1="200" y1="318" x2="200" y2="400" stroke="#333" marker-end="url(#a3)"/>
+      </g>
+    </svg>
+  </section>
+
+  <!-- 4. Приёмник -->
+  <section>
+    <h2>4. Алгоритм узла-приёмника (цикл приёма)</h2>
+    <svg viewBox="0 0 580 640" xmlns="http://www.w3.org/2000/svg">
+      <defs><marker id="a4" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#333"/></marker></defs>
+      <g font-family="Segoe UI, sans-serif" font-size="11">
+        <ellipse cx="290" cy="26" rx="88" ry="20" fill="#2d6a4f" stroke="#1b4332" stroke-width="2"/>
+        <text x="290" y="30" text-anchor="middle" fill="#fff" font-weight="600">Порт открыт, цикл приёма</text>
+
+        <rect x="175" y="54" width="230" height="36" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="290" y="76" text-anchor="middle" fill="#fff">Ожидать кадр из appQueue (таймаут 1 с)</text>
+
+        <path d="M290 90 L290 108 L390 108 L390 148 L290 148" fill="none" stroke="#333"/>
+        <path d="M290 108 L190 108 L190 168" fill="none" stroke="#333" marker-end="url(#a4)"/>
+        <text x="240" y="102" font-size="10">кадр есть?</text>
+        <text x="205" y="125" font-size="10">нет (таймаут)</text>
+        <text x="330" y="125" font-size="10">да</text>
+
+        <path d="M190 168 L190 185 L290 185 L290 54" fill="none" stroke="#666" stroke-dasharray="5 3" marker-end="url(#a4)"/>
+        <text x="220" y="178" font-size="10" fill="#666">порт ещё открыт — снова ждать</text>
+
+        <rect x="200" y="156" width="180" height="140" rx="8" fill="#f0f4f8" stroke="#457b9d" stroke-width="1.5"/>
+        <text x="290" y="178" text-anchor="middle" font-weight="600" fill="#1d3557">Тип кадра</text>
+
+        <rect x="215" y="188" width="150" height="22" rx="4" fill="#7b2cbf"/>
+        <text x="290" y="204" text-anchor="middle" fill="#fff" font-size="10">LINK → ACK, лог</text>
+        <rect x="215" y="216" width="150" height="22" rx="4" fill="#7b2cbf"/>
+        <text x="290" y="232" text-anchor="middle" fill="#fff" font-size="10">META → ACK, подготовка буфера</text>
+        <rect x="215" y="244" width="150" height="22" rx="4" fill="#7b2cbf"/>
+        <text x="290" y="260" text-anchor="middle" fill="#fff" font-size="10">I → ACK, накопление данных</text>
+        <rect x="215" y="272" width="150" height="22" rx="4" fill="#7b2cbf"/>
+        <text x="290" y="288" text-anchor="middle" fill="#fff" font-size="10">END → ACK, декод [15,11], запись файла</text>
+
+        <line x1="290" y1="148" x2="290" y2="156" stroke="#333" marker-end="url(#a4)"/>
+
+        <rect x="215" y="310" width="150" height="30" rx="4" fill="#e63946"/>
+        <text x="290" y="330" text-anchor="middle" fill="#fff" font-size="10">UPLINK → ACK, сброс, ожидание новой сессии</text>
+        <line x1="290" y1="296" x2="290" y2="310" stroke="#333"/>
+
+        <path d="M290 340 L290 360 L420 360 L420 54 L320 54" fill="none" stroke="#333" marker-end="url(#a4)"/>
+        <text x="360" y="352" font-size="10">к циклу ожидания</text>
+
+        <rect x="165" y="380" width="250" height="50" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="290" y="402" text-anchor="middle" fill="#fff">Порт закрыт пользователем?</text>
+        <text x="290" y="418" text-anchor="middle" fill="#fff">→ выход из цикла</text>
+
+        <ellipse cx="290" cy="470" rx="70" ry="22" fill="#2d6a4f" stroke="#1b4332" stroke-width="2"/>
+        <text x="290" y="475" text-anchor="middle" fill="#fff" font-weight="600">Конец потока</text>
+      </g>
+    </svg>
+    <p class="note">Упрощённо: ветвление по типам реализовано последовательными if в коде; для каждого обработанного кадра отправляется ACK с тем же seq.</p>
+  </section>
+
+  <!-- 5. Кодирование -->
+  <section>
+    <h2>5. Схема кодирования содержимого файла [15,11]</h2>
+    <svg viewBox="0 0 640 200" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr5" markerWidth="7" markerHeight="7" refX="6" refY="3" orient="auto"><path d="M0,0 L7,3 L0,6 Z" fill="#333"/></marker>
+      </defs>
+      <g font-family="Segoe UI, sans-serif" font-size="12">
+        <rect x="20" y="70" width="100" height="50" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="70" y="92" text-anchor="middle" fill="#fff">Файл</text>
+        <text x="70" y="108" text-anchor="middle" fill="#fff">(байты)</text>
+        <line x1="120" y1="95" x2="155" y2="95" stroke="#333" marker-end="url(#arr5)"/>
+        <rect x="155" y="60" width="130" height="70" rx="6" fill="#7b2cbf" stroke="#5a189a"/>
+        <text x="220" y="88" text-anchor="middle" fill="#fff">Битовый поток,</text>
+        <text x="220" y="106" text-anchor="middle" fill="#fff">блоки по 11 бит</text>
+        <line x1="285" y1="95" x2="320" y2="95" stroke="#333" marker-end="url(#arr5)"/>
+        <rect x="320" y="55" width="130" height="80" rx="6" fill="#2d6a4f" stroke="#1b4332"/>
+        <text x="385" y="82" text-anchor="middle" fill="#fff">Циклический</text>
+        <text x="385" y="98" text-anchor="middle" fill="#fff">код [15,11]</text>
+        <text x="385" y="118" text-anchor="middle" fill="#fff">g(x)=x⁴+x+1</text>
+        <line x1="450" y1="95" x2="485" y2="95" stroke="#333" marker-end="url(#arr5)"/>
+        <rect x="485" y="65" width="130" height="60" rx="6" fill="#457b9d" stroke="#1d3557"/>
+        <text x="550" y="92" text-anchor="middle" fill="#fff">Байты для</text>
+        <text x="550" y="108" text-anchor="middle" fill="#fff">кадров FT_I</text>
+      </g>
+    </svg>
+  </section>
+
+  <p class="note" style="margin-top:2rem;">Файл можно открыть в браузере и сделать скриншот или «Печать → PDF» для вставки в пояснительную записку. При необходимости отдельные SVG можно перенести в Visio / Draw.io как вектор.</p>
+
+</body>
+</html>
